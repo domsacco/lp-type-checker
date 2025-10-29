@@ -1,4 +1,4 @@
-:- module(lexing,
+:- module(lexer,
           [ tokenize/2,        % tokenize(+String, -Tokens)
             skip_ws//0,        % exported for external debug helpers
             token//1           % exported for external debug helpers
