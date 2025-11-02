@@ -52,6 +52,10 @@
   "True se ch è un operatore logico."
   (find ch ",;"))
 
+(defun is-symbol-char? (ch)
+  "True se ch è un simbolo speciale"
+  (find ch "|#$%&<=>.:?@^~"))
+
 
 ;;;; Lettura di un file
 
@@ -61,11 +65,12 @@
 ;;;; Restituiamo la stringa
 
 (defun read-file-as-string (filename)
-  "Legge l'intero file come stringa."
+  "Legge il contenuto completo di un file come stringa."
   (with-open-file (in filename :direction :input)
-    (let ((content (make-string (file-length in))))
-      (read-sequence content in)
-      content)))
+    (with-output-to-string (out)
+      (loop for line = (read-line in nil)
+            while line do
+            (write-line line out)))))
 
 
 ;;;; Funzione principale
@@ -74,12 +79,12 @@
 ;;;; tokenize-prolog: funzione che esegue l'analisi lessicale
 
 (defun prolog-lexer (filename)
-  "Lexer principale: restituisce la lista di token da un file Prolog."
+  "Restituisce la lista di token da un file Prolog."
   (let ((text (read-file-as-string filename)))
     (tokenize-prolog text)))
 
 
-;;;; Tokenizer: associamo i token al testo
+;;;; Tokenizer: divide il testo in token
 
 (defun tokenize-prolog (text)
   (let ((tokens '())
@@ -116,11 +121,24 @@
                 ;; es. :string "hello"
                 ((char= ch #\')
                  (incf i)
-                 (let ((start i))
-                   (loop while (and (< i len)
-                                    (not (char= (char text i) #\')))
-                         do (incf i))
-                   (push (list :string (subseq text start i)) tokens)
+                 (let ((start i)
+                       (str ""))
+                   (loop while (< i len)
+                         for c = (char text i)
+                         do (cond
+                              ;; Escape '' -> '
+                              ((and (char= c #\')
+                                    (< (1+ i) len)
+                                    (char= (char text (1+ i)) #\')))
+                               (setf str (concatenate 'string str "'"))
+                               (incf i 2))
+                              ;; Fine stringa
+                              ((char= c #\') (return))
+                              ;; Carattere normale
+                              (t
+                               (setf str (concatenate 'string str (string c)))
+                               (incf i))))
+                   (push (list :string str) tokens)
                    (incf i)))
 
                 ;; Numeri (interi e decimali)
@@ -142,36 +160,45 @@
                          (push (list :float (read-from-string (subseq text start i))) tokens))
                        (push (list :integer (parse-integer (subseq text start i))) tokens))))
 
-                ;; Simboli speciali composti: :- --> == \=
-                ;; es. :special ":-"
-				;; es. :comparison "=="
-                ((and (< (1+ i) len)
-                      (or (and (char= ch #\:) (char= (char text (1+ i)) #\-)) ; :-
-                          (and (char= ch #\-) (char= (char text (1+ i)) #\>)) ; -->
-                          (and (char= ch #\=) (char= (char text (1+ i)) #\=)) ; ==
-                          (and (char= ch #\\) (char= (char text (1+ i)) #\=)))) ) ; \=
-                 (let ((sym (subseq text i (+ i 2))))
-                   (push (list (if (or (string= sym "==") (string= sym "\\="))
-                                   :comparison
-                                   :special)
-                               sym)
-                         tokens)
-                   (incf i 2)))
+                ;; Operatori speciali composti: :- --> == \= ecc.
+                ;; es. :operator ":-"
+				((and (< (+ i 1) len)
+					(member (subseq text i (min len (+ i 3)))
+							'(":-" "-->" "->" "=<" ">=" "\\=" "\\=="
+							  "==" "=.." "@<" "@=<" "@>" "@>=" "//" "**")
+							:test #'string-prefix-p))
+				 (let* ((max-len (min 3 (- len i)))
+						(match (find-if (lambda (s)
+										  (and (<= (length s) max-len)
+												 (string= s (subseq text i (+ i (length s))))))
+										'(":-" "-->" "->" "=<" ">=" "\\=" "\\=="
+										  "==" "=.." "@<" "@=<" "@>" "@>=" "//" "**"))))
+				 (when match
+					(push (list :operator match) tokens)
+					(incf i (length match)))))
 
                 ;; Operatori matematici e relazionali: + - * / ^ >= =<
                 ;; es. :math-op "+"
-                ((and (< (1+ i) len)
-                      (or (char= ch #\>) (char= ch #\<)))
-                 (if (char= (char text (1+ i)) #\=)
-                     (progn
-                       (push (list :math-op (subseq text i (+ i 2))) tokens)
-                       (incf i 2))
-                     (push (list :math-op (string ch)) tokens)
-                     (incf i)))
-                ((is-math-op-char? ch)
-                 (push (list :math-op (string ch)) tokens)
-                 (incf i))
+                ;; operatori a due caratteri: >=, =<, //, **
+				((and (< (+ i 1) len)
+					(member (subseq text i (+ i 2)) '("=<" ">=" "//" "**") :test #'string=))
+				 (push (list :math-op (subseq text i (+ i 2))) tokens)
+				 (incf i 2))
 
+				;; operatori singoli: + - * / ^ < >
+				((is-math-op-char? (peek))
+				 (push (list :math-op (string (next))) tokens))
+
+				;; parole chiave matematiche: div, mod
+				((and (lower-case-p (peek))
+				 (let ((start i))
+					(loop while (and (< i len)
+									 (is-letter? (char text i)))
+							do (incf i))
+					(member (subseq text start i) '("div" "mod") :test #'string=)))
+				 (let ((op (subseq text (- i 3) i)))  ; div o mod hanno 3 caratteri
+					(push (list :math-op op) tokens)))
+				
                 ;; Punteggiatura
                 ;; es. :punctuation "("
                 ((is-punctuation? ch)
@@ -204,12 +231,18 @@
                          do (incf i))
                    (push (list :atom (subseq text start i)) tokens)))
 
-                ;; Altri simboli singoli
-                ;; es. :cut "!"
+                ;; Cut
+                ;; :cut "!"
                 ((is-cut-char? ch)
                  (push (list :cut (string ch)) tokens)
                  (incf i))
-
+				
+				;; Altri simboli
+				;; es. :symbol "|"
+				((is-symbol-char? ch)
+                 (push (list :symbol (string ch)) tokens)
+                 (incf i))
+				
                 ;; Altri caratteri sconosciuti
                 (t
                  (push (list :unknown (string ch)) tokens)
